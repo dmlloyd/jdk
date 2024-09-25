@@ -26,10 +26,13 @@ package java.lang;
 
 import java.security.AccessController;
 import java.security.PrivilegedAction;
+import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
@@ -39,8 +42,11 @@ import java.util.concurrent.ForkJoinWorkerThread;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
 import jdk.internal.event.VirtualThreadEndEvent;
 import jdk.internal.event.VirtualThreadPinnedEvent;
 import jdk.internal.event.VirtualThreadStartEvent;
@@ -69,7 +75,7 @@ final class VirtualThread extends BaseVirtualThread {
     private static final Unsafe U = Unsafe.getUnsafe();
     private static final ContinuationScope VTHREAD_SCOPE = new ContinuationScope("VirtualThreads");
     private static final ForkJoinPool DEFAULT_SCHEDULER = createDefaultScheduler();
-    private static final ScheduledExecutorService[] DELAYED_TASK_SCHEDULERS = createDelayedTaskSchedulers();
+    private static final ScheduledExecutorService DELAYED_TASK_SCHEDULER = new StripedScheduledThreadPoolExecutor();
     private static final int TRACE_PINNING_MODE = tracePinningMode();
 
     private static final long STATE = U.objectFieldOffset(VirtualThread.class, "state");
@@ -783,7 +789,7 @@ final class VirtualThread extends BaseVirtualThread {
         // need to switch to current carrier thread to avoid nested parking
         switchToCarrierThread();
         try {
-            return schedule(this::unpark, nanos, NANOSECONDS);
+            return DELAYED_TASK_SCHEDULER.schedule(this::unpark, nanos, NANOSECONDS);
         } finally {
             switchToVirtualThread(this);
         }
@@ -1345,15 +1351,6 @@ final class VirtualThread extends BaseVirtualThread {
     }
 
     /**
-     * Schedule a runnable task to run after a delay.
-     */
-    private static Future<?> schedule(Runnable command, long delay, TimeUnit unit) {
-        long tid = Thread.currentThread().threadId();
-        int index = (int) tid & (DELAYED_TASK_SCHEDULERS.length - 1);
-        return DELAYED_TASK_SCHEDULERS[index].schedule(command, delay, unit);
-    }
-
-    /**
      * Creates the ScheduledThreadPoolExecutors used to execute delayed tasks.
      */
     private static ScheduledExecutorService[] createDelayedTaskSchedulers() {
@@ -1381,6 +1378,90 @@ final class VirtualThread extends BaseVirtualThread {
             schedulers[i] = stpe;
         }
         return schedulers;
+    }
+
+    static final class StripedScheduledThreadPoolExecutor implements ScheduledExecutorService {
+        private final ScheduledExecutorService[] pools;
+
+        StripedScheduledThreadPoolExecutor() {
+            pools = createDelayedTaskSchedulers();
+        }
+
+        private ScheduledExecutorService delegate() {
+            long tid = Thread.currentThread().threadId();
+            int index = (int) tid & (pools.length - 1);
+            return pools[index];
+        }
+
+        public ScheduledFuture<?> schedule(final Runnable command, final long delay, final TimeUnit unit) {
+            return delegate().schedule(command, delay, unit);
+        }
+
+        public <V> ScheduledFuture<V> schedule(final Callable<V> callable, final long delay, final TimeUnit unit) {
+            return delegate().schedule(callable, delay, unit);
+        }
+
+        public ScheduledFuture<?> scheduleAtFixedRate(final Runnable command, final long initialDelay, final long period, final TimeUnit unit) {
+            return delegate().scheduleAtFixedRate(command, initialDelay, period, unit);
+        }
+
+        public ScheduledFuture<?> scheduleWithFixedDelay(final Runnable command, final long initialDelay, final long delay, final TimeUnit unit) {
+            return delegate().scheduleWithFixedDelay(command, initialDelay, delay, unit);
+        }
+
+        public <T> Future<T> submit(final Callable<T> task) {
+            return delegate().submit(task);
+        }
+
+        public <T> Future<T> submit(final Runnable task, final T result) {
+            return delegate().submit(task, result);
+        }
+
+        public Future<?> submit(final Runnable task) {
+            return delegate().submit(task);
+        }
+
+        public <T> List<Future<T>> invokeAll(final Collection<? extends Callable<T>> tasks) throws InterruptedException {
+            return delegate().invokeAll(tasks);
+        }
+
+        public <T> List<Future<T>> invokeAll(final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) throws InterruptedException {
+            return delegate().invokeAll(tasks, timeout, unit);
+        }
+
+        public <T> T invokeAny(final Collection<? extends Callable<T>> tasks) throws InterruptedException, ExecutionException {
+            return delegate().invokeAny(tasks);
+        }
+
+        public <T> T invokeAny(final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+            return delegate().invokeAny(tasks, timeout, unit);
+        }
+
+        public void execute(final Runnable command) {
+            delegate().execute(command);
+        }
+
+        // --
+
+        public void shutdown() {
+            throw new UnsupportedOperationException();
+        }
+
+        public List<Runnable> shutdownNow() {
+            throw new UnsupportedOperationException();
+        }
+
+        public boolean isShutdown() {
+            return false;
+        }
+
+        public boolean isTerminated() {
+            return false;
+        }
+
+        public boolean awaitTermination(final long timeout, final TimeUnit unit) {
+            throw new UnsupportedOperationException();
+        }
     }
 
     /**
