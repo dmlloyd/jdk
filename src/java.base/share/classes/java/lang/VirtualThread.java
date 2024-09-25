@@ -24,10 +24,13 @@
  */
 package java.lang;
 
-import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
@@ -36,9 +39,12 @@ import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
+
 import jdk.internal.event.VirtualThreadEndEvent;
 import jdk.internal.event.VirtualThreadStartEvent;
 import jdk.internal.event.VirtualThreadSubmitFailedEvent;
@@ -66,7 +72,7 @@ final class VirtualThread extends BaseVirtualThread {
     private static final Unsafe U = Unsafe.getUnsafe();
     private static final ContinuationScope VTHREAD_SCOPE = new ContinuationScope("VirtualThreads");
     private static final ForkJoinPool DEFAULT_SCHEDULER = createDefaultScheduler();
-    private static final ScheduledExecutorService[] DELAYED_TASK_SCHEDULERS = createDelayedTaskSchedulers();
+    private static final ScheduledExecutorService DELAYED_TASK_SCHEDULER = new StripedScheduledThreadPoolExecutor();
 
     private static final long STATE = U.objectFieldOffset(VirtualThread.class, "state");
     private static final long PARK_PERMIT = U.objectFieldOffset(VirtualThread.class, "parkPermit");
@@ -197,7 +203,7 @@ final class VirtualThread extends BaseVirtualThread {
      * Returns a stream of the delayed task schedulers used to support timed operations.
      */
     static Stream<ScheduledExecutorService> delayedTaskSchedulers() {
-        return Arrays.stream(DELAYED_TASK_SCHEDULERS);
+        return Stream.of(DELAYED_TASK_SCHEDULER);
     }
 
     /**
@@ -568,7 +574,7 @@ final class VirtualThread extends BaseVirtualThread {
             } else {
                 // schedule unpark
                 assert timeout > 0;
-                timeoutTask = schedule(this::unpark, timeout, NANOSECONDS);
+                timeoutTask = DELAYED_TASK_SCHEDULER.schedule(this::unpark, timeout, NANOSECONDS);
                 setState(newState = TIMED_PARKED);
             }
 
@@ -621,7 +627,7 @@ final class VirtualThread extends BaseVirtualThread {
                 assert timeout > 0;
                 synchronized (timedWaitLock()) {
                     byte seqNo = ++timedWaitSeqNo;
-                    timeoutTask = schedule(() -> waitTimeoutExpired(seqNo), timeout, MILLISECONDS);
+                    timeoutTask = DELAYED_TASK_SCHEDULER.schedule(() -> waitTimeoutExpired(seqNo), timeout, MILLISECONDS);
                     setState(newState = TIMED_WAIT);
                 }
             }
@@ -1442,15 +1448,6 @@ final class VirtualThread extends BaseVirtualThread {
     }
 
     /**
-     * Schedule a runnable task to run after a delay.
-     */
-    private static Future<?> schedule(Runnable command, long delay, TimeUnit unit) {
-        long tid = Thread.currentThread().threadId();
-        int index = (int) tid & (DELAYED_TASK_SCHEDULERS.length - 1);
-        return DELAYED_TASK_SCHEDULERS[index].schedule(command, delay, unit);
-    }
-
-    /**
      * Creates the ScheduledThreadPoolExecutors used to execute delayed tasks.
      */
     private static ScheduledExecutorService[] createDelayedTaskSchedulers() {
@@ -1478,6 +1475,90 @@ final class VirtualThread extends BaseVirtualThread {
             schedulers[i] = stpe;
         }
         return schedulers;
+    }
+
+    static final class StripedScheduledThreadPoolExecutor implements ScheduledExecutorService {
+        private final ScheduledExecutorService[] pools;
+
+        StripedScheduledThreadPoolExecutor() {
+            pools = createDelayedTaskSchedulers();
+        }
+
+        private ScheduledExecutorService delegate() {
+            long tid = Thread.currentThread().threadId();
+            int index = (int) tid & (pools.length - 1);
+            return pools[index];
+        }
+
+        public ScheduledFuture<?> schedule(final Runnable command, final long delay, final TimeUnit unit) {
+            return delegate().schedule(command, delay, unit);
+        }
+
+        public <V> ScheduledFuture<V> schedule(final Callable<V> callable, final long delay, final TimeUnit unit) {
+            return delegate().schedule(callable, delay, unit);
+        }
+
+        public ScheduledFuture<?> scheduleAtFixedRate(final Runnable command, final long initialDelay, final long period, final TimeUnit unit) {
+            return delegate().scheduleAtFixedRate(command, initialDelay, period, unit);
+        }
+
+        public ScheduledFuture<?> scheduleWithFixedDelay(final Runnable command, final long initialDelay, final long delay, final TimeUnit unit) {
+            return delegate().scheduleWithFixedDelay(command, initialDelay, delay, unit);
+        }
+
+        public <T> Future<T> submit(final Callable<T> task) {
+            return delegate().submit(task);
+        }
+
+        public <T> Future<T> submit(final Runnable task, final T result) {
+            return delegate().submit(task, result);
+        }
+
+        public Future<?> submit(final Runnable task) {
+            return delegate().submit(task);
+        }
+
+        public <T> List<Future<T>> invokeAll(final Collection<? extends Callable<T>> tasks) throws InterruptedException {
+            return delegate().invokeAll(tasks);
+        }
+
+        public <T> List<Future<T>> invokeAll(final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) throws InterruptedException {
+            return delegate().invokeAll(tasks, timeout, unit);
+        }
+
+        public <T> T invokeAny(final Collection<? extends Callable<T>> tasks) throws InterruptedException, ExecutionException {
+            return delegate().invokeAny(tasks);
+        }
+
+        public <T> T invokeAny(final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
+            return delegate().invokeAny(tasks, timeout, unit);
+        }
+
+        public void execute(final Runnable command) {
+            delegate().execute(command);
+        }
+
+        // --
+
+        public void shutdown() {
+            throw new UnsupportedOperationException();
+        }
+
+        public List<Runnable> shutdownNow() {
+            throw new UnsupportedOperationException();
+        }
+
+        public boolean isShutdown() {
+            return false;
+        }
+
+        public boolean isTerminated() {
+            return false;
+        }
+
+        public boolean awaitTermination(final long timeout, final TimeUnit unit) {
+            throw new UnsupportedOperationException();
+        }
     }
 
     /**
