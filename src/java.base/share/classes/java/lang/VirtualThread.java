@@ -34,6 +34,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinPool.ForkJoinWorkerThreadFactory;
@@ -74,8 +75,6 @@ import static java.util.concurrent.TimeUnit.*;
 final class VirtualThread extends BaseVirtualThread {
     private static final Unsafe U = Unsafe.getUnsafe();
     private static final ContinuationScope VTHREAD_SCOPE = new ContinuationScope("VirtualThreads");
-    private static final ForkJoinPool DEFAULT_SCHEDULER = createDefaultScheduler();
-    private static final ScheduledExecutorService DELAYED_TASK_SCHEDULER = new StripedScheduledThreadPoolExecutor();
     private static final int TRACE_PINNING_MODE = tracePinningMode();
 
     private static final long STATE = U.objectFieldOffset(VirtualThread.class, "state");
@@ -84,7 +83,7 @@ final class VirtualThread extends BaseVirtualThread {
     private static final long TERMINATION = U.objectFieldOffset(VirtualThread.class, "termination");
 
     // scheduler and continuation
-    private final Executor scheduler;
+    private final ScheduledExecutorService scheduler;
     private final Continuation cont;
     private final Runnable runContinuation;
 
@@ -153,7 +152,7 @@ final class VirtualThread extends BaseVirtualThread {
      * Returns the default scheduler.
      */
     static Executor defaultScheduler() {
-        return DEFAULT_SCHEDULER;
+        return StripedScheduledThreadPoolExecutor.INSTANCE;
     }
 
     /**
@@ -175,7 +174,7 @@ final class VirtualThread extends BaseVirtualThread {
      * @param characteristics characteristics
      * @param task the task to execute
      */
-    VirtualThread(Executor scheduler, String name, int characteristics, Runnable task) {
+    VirtualThread(ScheduledExecutorService scheduler, String name, int characteristics, Runnable task) {
         super(name, characteristics, /*bound*/ false);
         Objects.requireNonNull(task);
 
@@ -185,7 +184,7 @@ final class VirtualThread extends BaseVirtualThread {
             if (parent instanceof VirtualThread vparent) {
                 scheduler = vparent.scheduler;
             } else {
-                scheduler = DEFAULT_SCHEDULER;
+                scheduler = StripedScheduledThreadPoolExecutor.INSTANCE;
             }
         }
 
@@ -365,7 +364,7 @@ final class VirtualThread extends BaseVirtualThread {
      * @throws OutOfMemoryError
      */
     private void externalSubmitRunContinuationOrThrow() {
-        if (scheduler == DEFAULT_SCHEDULER && currentCarrierThread() instanceof CarrierThread ct) {
+        if (scheduler instanceof StripedScheduledThreadPoolExecutor && currentCarrierThread() instanceof CarrierThread ct) {
             try {
                 ct.getPool().externalSubmit(ForkJoinTask.adapt(runContinuation));
             } catch (RejectedExecutionException ree) {
@@ -789,7 +788,7 @@ final class VirtualThread extends BaseVirtualThread {
         // need to switch to current carrier thread to avoid nested parking
         switchToCarrierThread();
         try {
-            return DELAYED_TASK_SCHEDULER.schedule(this::unpark, nanos, NANOSECONDS);
+            return scheduler.schedule(this::unpark, nanos, NANOSECONDS);
         } finally {
             switchToVirtualThread(this);
         }
@@ -1381,10 +1380,17 @@ final class VirtualThread extends BaseVirtualThread {
     }
 
     static final class StripedScheduledThreadPoolExecutor implements ScheduledExecutorService {
-        private final ScheduledExecutorService[] pools;
+        private static final StripedScheduledThreadPoolExecutor INSTANCE = new StripedScheduledThreadPoolExecutor();
+
+        private final ExecutorService fjp;
+        private final ScheduledExecutorService[] pools = createDelayedTaskSchedulers();
+
+        StripedScheduledThreadPoolExecutor(final ExecutorService fjp) {
+            this.fjp = fjp;
+        }
 
         StripedScheduledThreadPoolExecutor() {
-            pools = createDelayedTaskSchedulers();
+            fjp = createDefaultScheduler();
         }
 
         private ScheduledExecutorService delegate() {
@@ -1409,36 +1415,38 @@ final class VirtualThread extends BaseVirtualThread {
             return delegate().scheduleWithFixedDelay(command, initialDelay, delay, unit);
         }
 
+        // --
+
         public <T> Future<T> submit(final Callable<T> task) {
-            return delegate().submit(task);
+            return fjp.submit(task);
         }
 
         public <T> Future<T> submit(final Runnable task, final T result) {
-            return delegate().submit(task, result);
+            return fjp.submit(task, result);
         }
 
         public Future<?> submit(final Runnable task) {
-            return delegate().submit(task);
+            return fjp.submit(task);
         }
 
         public <T> List<Future<T>> invokeAll(final Collection<? extends Callable<T>> tasks) throws InterruptedException {
-            return delegate().invokeAll(tasks);
+            return fjp.invokeAll(tasks);
         }
 
         public <T> List<Future<T>> invokeAll(final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) throws InterruptedException {
-            return delegate().invokeAll(tasks, timeout, unit);
+            return fjp.invokeAll(tasks, timeout, unit);
         }
 
         public <T> T invokeAny(final Collection<? extends Callable<T>> tasks) throws InterruptedException, ExecutionException {
-            return delegate().invokeAny(tasks);
+            return fjp.invokeAny(tasks);
         }
 
         public <T> T invokeAny(final Collection<? extends Callable<T>> tasks, final long timeout, final TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
-            return delegate().invokeAny(tasks, timeout, unit);
+            return fjp.invokeAny(tasks, timeout, unit);
         }
 
         public void execute(final Runnable command) {
-            delegate().execute(command);
+            fjp.execute(command);
         }
 
         // --
