@@ -29,10 +29,15 @@ import java.lang.Thread.Builder.OfVirtual;
 import java.lang.Thread.UncaughtExceptionHandler;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+
 import jdk.internal.misc.Unsafe;
 import jdk.internal.invoke.MhUtil;
 import jdk.internal.vm.ContinuationSupport;
@@ -210,13 +215,41 @@ class ThreadBuilders {
      */
     static final class VirtualThreadBuilder
             extends BaseThreadBuilder implements OfVirtual {
-        private Executor scheduler;
+        private ScheduledExecutorService scheduler;
 
         VirtualThreadBuilder() {
         }
 
         // invoked by tests
         VirtualThreadBuilder(Executor scheduler) {
+            this(new VirtualThread.StripedScheduledThreadPoolExecutor(new AbstractExecutorService() {
+                public void shutdown() {
+                    throw new UnsupportedOperationException();
+                }
+
+                public List<Runnable> shutdownNow() {
+                    throw new UnsupportedOperationException();
+                }
+
+                public boolean isShutdown() {
+                    return false;
+                }
+
+                public boolean isTerminated() {
+                    return false;
+                }
+
+                public boolean awaitTermination(final long timeout, final TimeUnit unit) {
+                    throw new UnsupportedOperationException();
+                }
+
+                public void execute(final Runnable command) {
+                    scheduler.execute(command);
+                }
+            }));
+        }
+
+        VirtualThreadBuilder(ScheduledExecutorService scheduler) {
             if (!ContinuationSupport.isSupported())
                 throw new UnsupportedOperationException();
             this.scheduler = Objects.requireNonNull(scheduler);
@@ -369,9 +402,9 @@ class ThreadBuilders {
      * ThreadFactory for virtual threads.
      */
     private static class VirtualThreadFactory extends BaseThreadFactory {
-        private final Executor scheduler;
+        private final ScheduledExecutorService scheduler;
 
-        VirtualThreadFactory(Executor scheduler,
+        VirtualThreadFactory(ScheduledExecutorService scheduler,
                              String name,
                              long start,
                              int characteristics,
@@ -395,7 +428,7 @@ class ThreadBuilders {
     /**
      * Creates a new virtual thread to run the given task.
      */
-    static Thread newVirtualThread(Executor scheduler,
+    static Thread newVirtualThread(ScheduledExecutorService scheduler,
                                    String name,
                                    int characteristics,
                                    Runnable task) {
