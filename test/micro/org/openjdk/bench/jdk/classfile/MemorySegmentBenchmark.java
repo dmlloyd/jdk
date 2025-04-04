@@ -26,7 +26,10 @@ import java.io.IOException;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
 import java.lang.classfile.ClassTransform;
+import java.lang.classfile.CodeTransform;
 import java.lang.classfile.CompoundElement;
+import java.lang.classfile.FieldTransform;
+import java.lang.classfile.MethodTransform;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SegmentAllocator;
@@ -54,6 +57,10 @@ import org.openjdk.jmh.infra.Blackhole;
 @Fork(value = 1)
 @State(Scope.Benchmark)
 public class MemorySegmentBenchmark {
+    private static final ClassTransform WORST_XFORM = ClassTransform.transformingMethodBodies(CodeTransform.ACCEPT_ALL);
+    private static final ClassTransform MID_XFORM = ClassTransform.transformingMethods(mm -> mm.methodName().stringValue().hashCode() % 2 == 0, MethodTransform.transformingCode(CodeTransform.ACCEPT_ALL));
+    private static final ClassTransform BEST_XFORM = ClassTransform.ACCEPT_ALL;
+
     private ClassFile classFile;
     private byte[] inputBytes0;
     private ClassModel model0;
@@ -82,26 +89,75 @@ public class MemorySegmentBenchmark {
 
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
-    public void emitWithoutCopy0(Blackhole bh) {
-        classFile.transformClass(segmentAllocator, model0, ClassTransform.ACCEPT_ALL);
+    public void emitWithoutCopyBest0(Blackhole bh) {
+        classFile.transformClass(segmentAllocator, model0, BEST_XFORM);
     }
 
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
-    public void emitWithCopy0(Blackhole bh) {
-        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model0, ClassTransform.ACCEPT_ALL)));
+    public void emitWithCopyBest0(Blackhole bh) {
+        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model0, BEST_XFORM)));
     }
 
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
-    public void emitWithoutCopy1(Blackhole bh) {
-        classFile.transformClass(segmentAllocator, model1, ClassTransform.ACCEPT_ALL);
+    public void emitWithoutCopyBest1(Blackhole bh) {
+        classFile.transformClass(segmentAllocator, model1, BEST_XFORM);
     }
 
     @Benchmark
     @BenchmarkMode(Mode.Throughput)
-    public void emitWithCopy1(Blackhole bh) {
-        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model1, ClassTransform.ACCEPT_ALL)));
+    public void emitWithCopyBest1(Blackhole bh) {
+        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model1, BEST_XFORM)));
+    }
+
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithoutCopyMid0(Blackhole bh) {
+        classFile.transformClass(segmentAllocator, model0, MID_XFORM);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithCopyMid0(Blackhole bh) {
+        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model0, MID_XFORM)));
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithoutCopyMid1(Blackhole bh) {
+        classFile.transformClass(segmentAllocator, model1, MID_XFORM);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithCopyMid1(Blackhole bh) {
+        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model1, MID_XFORM)));
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithoutCopyWorst0(Blackhole bh) {
+        classFile.transformClass(segmentAllocator, model0, WORST_XFORM);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithCopyWorst0(Blackhole bh) {
+        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model0, WORST_XFORM)));
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithoutCopyWorst1(Blackhole bh) {
+        classFile.transformClass(segmentAllocator, model1, WORST_XFORM);
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.Throughput)
+    public void emitWithCopyWorst1(Blackhole bh) {
+        outputSegment.copyFrom(MemorySegment.ofArray(classFile.transformClass(model1, WORST_XFORM)));
     }
 
     private static void consume(CompoundElement<?> parent) {
