@@ -86,7 +86,8 @@ final class VirtualThread extends BaseVirtualThread {
     // scheduler and continuation
     private final VirtualThreadScheduler scheduler;
     private final Continuation cont;
-    private final Runnable runContinuation;
+    private final RunContinuation runContinuation;
+    private Object attachment;
 
     // virtual thread state, accessed by VM
     private volatile int state;
@@ -253,7 +254,7 @@ final class VirtualThread extends BaseVirtualThread {
 
         this.scheduler = scheduler;
         this.cont = new VThreadContinuation(this, task);
-        this.runContinuation = this::runContinuation;
+        this.runContinuation = new RunContinuation();
     }
 
     /**
@@ -1633,5 +1634,15 @@ final class VirtualThread extends BaseVirtualThread {
                 VirtualThread::unblockVirtualThreads);
         unblocker.setDaemon(true);
         unblocker.start();
+    }
+
+    final class RunContinuation implements Runnable {
+        VirtualThread virtualThread() {
+            return VirtualThread.this;
+        }
+
+        public void run() {
+            runContinuation();
+        }
     }
 }
